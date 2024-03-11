@@ -17,7 +17,6 @@ from keras.optimizers import Adam
 from pirl_agent.DQN import PIRLagent, agentOptions, train, trainOptions, pinnOptions
 
 
-
 ###################################################################################
 # Environment (exmaple in ACC2024 paper)
 class PlanerEnv:
@@ -67,7 +66,6 @@ class PlanerEnv:
         return new_state, reward, done
 
 
-
 def convection_model(x_and_actIdx):
 
     x      = x_and_actIdx[:-1]
@@ -91,7 +89,26 @@ def diffusion_model(x_and_actIdx):
  
     return diff
 
+def sample_for_pinn():
 
+    # Interior points    
+    nPDE  = 8
+    x_min, x_max = np.array([-1.5, -1.0, 0]), np.array([1.5, 1.0, 2.0])                
+    X_PDE = x_min + (x_max - x_min)* np.random.rand(nPDE, 3)
+
+    # Terminal boundary (at T=0 and safe)
+    nBDini  = 8
+    x_min, x_max = np.array([-1.5, -1.0, 0]), np.array([1.5, 1.0, 0])                
+    X_BD_TERM = x_min + (x_max - x_min)* np.random.rand(nBDini, 3)
+
+    # Lateral boundary (unsafe set)        
+    nBDsafe = 8
+    x_min, x_max = np.array([-1.5, 1.0, 0]), np.array([1.5, 1.0, 2.0])
+    X_BD_LAT = x_min + (x_max - x_min)* np.random.rand(nBDsafe, 3)
+    x2_sign  = np.sign(np.random.randn(nBDsafe) )
+    X_BD_LAT[:,1] = X_BD_LAT[:,1] * x2_sign    
+    
+    return X_PDE, X_BD_TERM, X_BD_LAT
 
 
 ################################################################################################
@@ -124,9 +141,10 @@ def main(log_dir):
     
     pinnOp = pinnOptions(
         CONVECTION_MODEL = convection_model,
-        DIFFUSION_MODEL  = diffusion_model,      
-        WEIGHT_PDE      = 1e-3, 
-        WEIGHT_BOUNDARY = 1, 
+        DIFFUSION_MODEL  = diffusion_model,   
+        SAMPLING_FUN     = sample_for_pinn,
+        WEIGHT_PDE       = 1e-3, 
+        WEIGHT_BOUNDARY  = 1, 
         )
     
     agent  = PIRLagent(model, actNum, agentOp, pinnOp)

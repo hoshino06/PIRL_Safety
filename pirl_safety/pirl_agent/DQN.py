@@ -47,6 +47,7 @@ def agentOptions(
 def pinnOptions(
         CONVECTION_MODEL,
         DIFFUSION_MODEL,
+        SAMPLING_FUN, 
         WEIGHT_PDE      = 1e-3, 
         WEIGHT_BOUNDARY = 1, 
         ):
@@ -54,6 +55,7 @@ def pinnOptions(
     pinnOp = {
         'CONVECTION_MODEL': CONVECTION_MODEL,
         'DIFFUSION_MODEL' : DIFFUSION_MODEL, 
+        'SAMPLING_FUN'    : SAMPLING_FUN,
         'WEIGHT_PDE'      : WEIGHT_PDE,
         'WEIGHT_BOUNDARY' : WEIGHT_BOUNDARY
         }
@@ -159,28 +161,17 @@ class PIRLagent:
 
         ##########################
         # Samples for PDE
-        nPDE  = 8
-        x_min, x_max = np.array([-1.5, -1.0, 0]), np.array([1.5, 1.0, 2.0])                
-        X_PDE = x_min + (x_max - x_min)* np.random.rand(nPDE, 3)
-        X_PDE = tf.Variable(X_PDE)
+        X_PDE, X_BDini, X_BDsafe = self.pinnOp['SAMPLING_FUN']()
+        X_PDE = tf.Variable(X_PDE)        
+
         # Convection and diffusion coefficient
+        X_PDE = tf.Variable(X_PDE)
         Qsa = self.model(X_PDE)
         Uidx_PDE   = np.argmax(Qsa, axis=1).reshape(-1, 1)
         f          = np.apply_along_axis(self.pinnOp['CONVECTION_MODEL'], 1, 
                                          np.concatenate([X_PDE, Uidx_PDE], axis=1) )
         A =  np.apply_along_axis(self.pinnOp['DIFFUSION_MODEL'], 1, np.concatenate([X_PDE, Uidx_PDE], axis=1))
 
-        # Samples for boundary (at T=0 and safe)
-        nBDini  = 8
-        x_min, x_max = np.array([-1.5, -1.0, 0]), np.array([1.5, 1.0, 0])                
-        X_BDini = x_min + (x_max - x_min)* np.random.rand(nBDini, 3)
-
-        # Samples for boundary (at unsafe set)        
-        nBDsafe = 8
-        x_min, x_max = np.array([-1.5, 1.0, 0]), np.array([1.5, 1.0, 2.0])
-        X_BDsafe = x_min + (x_max - x_min)* np.random.rand(nBDsafe, 3)
-        x2_sign  = np.sign(np.random.randn(nBDsafe) )
-        X_BDsafe[:,1] = X_BDsafe[:,1] * x2_sign
 
         end_time = datetime.datetime.now()
         elapsed_time = end_time - start_time
