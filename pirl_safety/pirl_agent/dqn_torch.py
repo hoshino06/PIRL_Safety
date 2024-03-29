@@ -9,12 +9,14 @@
 __author__ = 'Hikaru Hoshino'
 __email__ = 'hoshino@eng.u-hyogo.ac.jp'
 
+import os
 import numpy as np
 import random
 import copy
 from collections import deque # double-ended que
 from tqdm import tqdm  # progress bar
 import torch
+from   torch.utils.tensorboard import SummaryWriter
 
 # Agent Options
 def agentOptions(
@@ -192,7 +194,7 @@ class PIRLagent:
 
         if self.pinnOp['HESSIAN_CALC']: 
 
-            from functorch import hessian
+            #from functorch import hessian
             
             X_PDE = torch.tensor(X_PDE, dtype=torch.float, requires_grad=True)
             Qsa   = self.model(X_PDE)
@@ -291,7 +293,7 @@ class PIRLagent:
             self.target_update_counter += 1
 
             if self.target_update_counter > self.agentOp['UPDATE_TARGET_EVERY']:
-                self.target_model.set_weights(self.model.get_weights())
+                self.target_model.load_state_dict(self.model.state_dict())
                 self.target_update_counter = 0
 
             ##############################
@@ -302,21 +304,27 @@ class PIRLagent:
 
     def load_weights(self, ckpt_dir, ckpt_idx=None):
 
-        checkpoint = tf.train.Checkpoint(model = self.model)
-        manager    = tf.train.CheckpointManager(checkpoint, 
-                                                directory=ckpt_dir, 
-                                                max_to_keep=1000)
+        if not os.path.isdir(ckpt_dir):         
+            raise FileNotFoundError("Directory '{}' does not exist.".format(ckpt_dir))
+
         if not ckpt_idx or ckpt_idx == 'latest': 
-            ckpt_path = manager.latest_checkpoint
+            check_points = [item for item in os.listdir(ckpt_dir) if 'agent' in item]
+            check_nums   = np.array([int(file_name.split('-')[1]) for file_name in check_points])
+            latest_ckpt  = f'/agent-{check_nums.max()}'  
+            ckpt_path    = ckpt_dir + latest_ckpt
         else:
-            ckpt_path = manager.checkpoints[ckpt_idx]
-   
-        checkpoint.restore(ckpt_path)
+            ckpt_path = ckpt_dir + f'/agent-{ckpt_idx}'
+            if not os.path.isfile(ckpt_path):   
+                raise FileNotFoundError("Check point 'agent-{}' does not exist.".format(ckpt_idx))
+
+        checkpoint = torch.load(ckpt_path)
+        self.model.load_state_dict(checkpoint['weights'])
+        self.target_model.load_state_dict(checkpoint['target-weights'])        
+        self.replay_memory = checkpoint['replay_memory']
         
         print(f'Agent loaded weights stored in {ckpt_path}')
         
         return ckpt_path    
-
 
 
 ###################################################################################
@@ -380,12 +388,7 @@ def train(agent, env, trainOp):
     if trainOp['LOG_DIR']: 
         
         # For training stats
-        summary_writer = tf.summary.create_file_writer(trainOp['LOG_DIR'])
-
-        # Check point (for recording weights)
-        ckpt    = tf.train.Checkpoint(model=agent.model)
-        manager = tf.train.CheckpointManager(ckpt, trainOp['LOG_DIR'], trainOp['EPISODES'],
-                                             checkpoint_name='weights')
+        summary_writer = SummaryWriter(log_dir=trainOp['LOG_DIR'])        
 
     start = 1 if trainOp['RESTART_EP'] == None else trainOp['RESTART_EP']
     # Iterate episodes
@@ -399,10 +402,16 @@ def train(agent, env, trainOp):
         ep_reward, ep_q0 = each_episode(agent, env, trainOp)
 
         if trainOp['LOG_DIR']: 
-            with summary_writer.as_default():
-                tf.summary.scalar('Episode Reward', ep_reward, step=episode)                    
-                tf.summary.scalar('Episode Q0',     ep_q0,     step=episode)                    
-            if trainOp['SAVE_AGENTS'] and episode % trainOp['SAVE_FREQ'] == 0:
-                manager.save(checkpoint_number=episode) 
+            summary_writer.add_scalar("Episode Reward", ep_reward, episode)
+            summary_writer.add_scalar("Episode Q0",     ep_q0,     episode)
+            summary_writer.flush()
 
+            if trainOp['SAVE_AGENTS'] and episode % trainOp['SAVE_FREQ'] == 0:
+                
+                ckpt_path = trainOp['LOG_DIR'] + f'/agent-{episode}'
+                torch.save({'weights':        agent.model.state_dict(),
+                            'target-weights': agent.target_model.state_dict(),
+                            'replay_memory':  agent.replay_memory}, 
+                           ckpt_path)
+                
     return 

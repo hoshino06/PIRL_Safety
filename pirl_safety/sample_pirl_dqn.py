@@ -12,7 +12,7 @@ import random
 from datetime import datetime
 
 # Environment
-from env.planer_env import PlanerEnv, convection_model, diffusion_model, sample_for_pinn
+from pirl_env.planer_env import PlanerEnv, convection_model, diffusion_model, sample_for_pinn
 
 ###############################################################################
 # 1. Main func with pytorch
@@ -53,7 +53,7 @@ def main_torch():
         REPLAY_MEMORY_MIN  = 100,
         MINIBATCH_SIZE     = 8,
         )
-        
+    
     pinnOp = pinnOptions(
         CONVECTION_MODEL = convection_model,
         DIFFUSION_MODEL  = diffusion_model,
@@ -70,13 +70,13 @@ def main_torch():
     trainOp = trainOptions(
         EPISODES      = 3000, 
         SHOW_PROGRESS = True, 
-        LOG_DIR       = None, #LOG_DIR,
+        LOG_DIR       = LOG_DIR,
         SAVE_AGENTS   = True, 
-        SAVE_FREQ     = 1000,
+        SAVE_FREQ     = 500,
         )
     train(agent, env, trainOp)
 
-    return agent
+    return agent, env
 
 ###############################################################################
 # 2. Main func with tensorflow
@@ -118,6 +118,7 @@ def main_tensorflow():
         SAMPLING_FUN     = sample_for_pinn, 
         WEIGHT_PDE       = 1e-3, 
         WEIGHT_BOUNDARY  = 1, 
+        HESSIAN_CALC     = False,
         )
     
     agent  = PIRLagent(model, actNum, agentOp, pinnOp)
@@ -135,7 +136,7 @@ def main_tensorflow():
         )
     train(agent, env, trainOp)
 
-    return agent
+    return agent, env
 
 
 ###############################################################################
@@ -144,6 +145,5 @@ if __name__ == '__main__':
     random.seed(1)
     np.random.seed(1)    
     
-    main_torch()
-    #main_tensorflow()
-    
+    agent, rl_env = main_torch()
+    #agent, rl_env = main_tensorflow()
