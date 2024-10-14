@@ -33,12 +33,10 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim):
         super(Critic, self).__init__()
-
         # Q1 architecture
         self.l1 = nn.Linear(state_dim + action_dim, 32)
         self.l2 = nn.Linear(32, 32)
         self.l3 = nn.Linear(32, 1)
-
         # Q2 architecture
         self.l4 = nn.Linear(state_dim + action_dim, 32)
         self.l5 = nn.Linear(32, 32)
@@ -46,22 +44,21 @@ class Critic(nn.Module):
 
     def forward(self, state, action):
         sa = torch.cat([state, action], 1)
-
-        q1 = F.tanh(self.l1(sa))
-        q1 = F.tanh(self.l2(q1))
-        q1 = F.sigmoid(self.l3(q1))
-
-        q2 = F.tanh(self.l4(sa))
-        q2 = F.tanh(self.l5(q2))
-        q2 = F.sigmoid(self.l6(q2))
+        # Q1 forward
+        q1 = torch.tanh(self.l1(sa))
+        q1 = torch.tanh(self.l2(q1))
+        q1 = torch.sigmoid(self.l3(q1))
+        # Q2 forward
+        q2 = torch.tanh(self.l4(sa))
+        q2 = torch.tanh(self.l5(q2))
+        q2 = torch.sigmoid(self.l6(q2))
         return q1, q2
 
     def Q1(self, state, action):
         sa = torch.cat([state, action], 1)
-
-        q1 = F.tanh(self.l1(sa))
-        q1 = F.tanh(self.l2(q1))
-        q1 = F.sigmoid(self.l3(q1))
+        q1 = torch.tanh(self.l1(sa))
+        q1 = torch.tanh(self.l2(q1))
+        q1 = torch.sigmoid(self.l3(q1))
         return q1
 
 ###########################################################################
@@ -124,11 +121,12 @@ class PIRLagent(object):
                  NOISE_CLIP         = 0.5,
                  POLICY_FREQ        = 2,
                  ## PINN options
-                 CONVECTION_MODEL   = None,
-                 DIFFUSION_MODEL    = None,
-                 SAMPLING_FUN       = None, 
-                 WEIGHT_PDE         = 1e-2, 
-                 WEIGHT_BOUNDARY    = 1
+                 PHYSICS_MODEL       = None, 
+                 WEIGHT_PDE          = 1e-3, 
+                 WEIGHT_BOUNDARY     = 1, 
+                 HESSIAN_CALC        = True,
+                 UNCERTAIN_PARAM     = None,
+                 PARAM_LEARN_RATE    = None, 
                  ):
         
         # Neural Networks (Actor and Critic)
@@ -153,6 +151,15 @@ class PIRLagent(object):
         self.policy_noise = POLICY_NOISE
         self.noise_clip   = NOISE_CLIP
         self.policy_freq  = POLICY_FREQ
+
+        # PINN options
+        self.physics_model    = PHYSICS_MODEL
+        self.WEIGHT_PDE       = WEIGHT_PDE
+        self.WEIGHT_BOUNDARY  = WEIGHT_BOUNDARY
+        self.HESSIAN_CALC     = HESSIAN_CALC        
+        self.UNCERTAIN_PARAM  = UNCERTAIN_PARAM
+        if not UNCERTAIN_PARAM == None:
+            self.param_optimizer  = torch.optim.Adam([UNCERTAIN_PARAM], lr=PARAM_LEARN_RATE)
 
         # Initialization
         self.policy_update_cnt = 0
@@ -281,10 +288,69 @@ class PIRLagent(object):
         current_Q1, current_Q2 = self.critic(state, action)
         critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
 
-        # Optimize the critic
+        ########################################
+        # Calculate PDE Loss
+        ########################################
+        if self.physics_model:
+            # Samples for PDE
+            X_PDE, X_ini, X_lat = self.physics_model.sampling()
+            X_PDE = torch.tensor(X_PDE, dtype=torch.float, requires_grad=True)
+            U_PDE = self.actor(X_PDE)
+            if not self.UNCERTAIN_PARAM == None:
+                f     = self.physics_model.convection(X_PDE, U_PDE, self.UNCERTAIN_PARAM)
+            else:
+                f     = self.physics_model.convection(X_PDE, U_PDE)    
+            V_PDE1, V_PDE2 = self.critic(X_PDE, U_PDE)
+            dV_dx_1 = torch.autograd.grad(V_PDE1.sum(), X_PDE, create_graph=True)[0]
+            dV_dx_2 = torch.autograd.grad(V_PDE2.sum(), X_PDE, create_graph=True)[0]
+            conv_term1 = ( dV_dx_1 * f ).sum(1)
+            conv_term2 = ( dV_dx_2 * f ).sum(1)
+
+        # Diffusion term
+        if self.physics_model and self.HESSIAN_CALC:
+            # start_time_hess = datetime.now()
+            diff_term1 = self.physics_model.diffusion(X_PDE, dV_dx_1)
+            diff_term2 = self.physics_model.diffusion(X_PDE, dV_dx_2)
+            # end_time_hess = datetime.now()
+            # elapsed_time = end_time_hess - start_time_hess
+            # print("hess cal time:", elapsed_time)       
+            critic_loss += F.mse_loss(conv_term1 + diff_term1, 
+                                      torch.zeros_like(conv_term1))*self.WEIGHT_PDE             
+            critic_loss += F.mse_loss(conv_term2 + diff_term2, 
+                                      torch.zeros_like(conv_term2))*self.WEIGHT_PDE
+        elif self.physics_model:
+            critic_loss += F.mse_loss(conv_term1, 
+                                      torch.zeros_like(conv_term1))*self.WEIGHT_PDE             
+            critic_loss += F.mse_loss(conv_term2, 
+                                      torch.zeros_like(conv_term2))*self.WEIGHT_PDE             
+        
+        ########################################
+        # Calculate Boundary Loss (lossB)
+        ########################################
+        if self.physics_model:
+            # termanal boundary (horizon = 0)
+            X_ini = torch.tensor(X_ini, dtype=torch.float32)
+            V_ini1,V_ini2 = self.critic(X_ini, self.actor(X_ini))
+            critic_loss  += (F.mse_loss( V_ini1, torch.ones_like(V_ini1))*self.WEIGHT_BOUNDARY
+                            +F.mse_loss( V_ini2, torch.ones_like(V_ini2))*self.WEIGHT_BOUNDARY)
+            
+            # lateral boundary
+            X_lat = torch.tensor(X_lat, dtype=torch.float32)
+            V_lat1,V_lat2 = self.critic(X_lat, self.actor(X_lat))
+            critic_loss  += (F.mse_loss( V_lat1, torch.zeros_like(V_lat1))*self.WEIGHT_BOUNDARY
+                            +F.mse_loss( V_lat2, torch.zeros_like(V_lat2))*self.WEIGHT_BOUNDARY)
+
+        #####################################
+        # Update neural network weights 
+        #####################################
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
+
+        if not self.UNCERTAIN_PARAM==None:
+            self.param_optimizer.step()
+            self.param_optimizer.zero_grad()
+
 
         ###############################################
         # Delayed policy updates

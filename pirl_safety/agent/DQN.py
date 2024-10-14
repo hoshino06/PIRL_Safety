@@ -93,22 +93,22 @@ class PIRLagent:
                  EPSILON_DECAY       = 0.998, 
                  EPSILON_MIN         = 0.01,
                  ## PINN options
-                 CONVECTION_MODEL    = None,
-                 DIFFUSION_MODEL     = None,
-                 SAMPLING_FUN        = None, 
+                 PHYSICS_MODEL       = None, 
                  WEIGHT_PDE          = 1e-3, 
                  WEIGHT_BOUNDARY     = 1, 
                  HESSIAN_CALC        = True,
+                 UNCERTAIN_PARAM     = None,
+                 PARAM_LEARN_RATE    = None, 
                  ): 
 
         # Critic
-        self.critic          = Critic(state_dim, action_num)
+        self.critic              = Critic(state_dim, action_num)
         self.critic_target       = copy.deepcopy(self.critic)
         self.critic_optimizer    = torch.optim.Adam(self.critic.parameters(), lr=CRITIC_LEARN_RATE)
         self.UPDATE_TARGET_EVERY = UPDATE_TARGET_EVERY
 
         # Replay Memory
-        self.replay_memory = ReplayMemory(state_dim, REPLAY_MEMORY_SIZE)
+        self.replay_memory     = ReplayMemory(state_dim, REPLAY_MEMORY_SIZE)
         self.REPLAY_MEMORY_MIN = REPLAY_MEMORY_MIN
         self.MINIBATCH_SIZE    = MINIBATCH_SIZE
         
@@ -121,12 +121,13 @@ class PIRLagent:
         self.EPSILON_DECAY = EPSILON_DECAY
         
         # PINN options
-        self.CONVECTION_MODEL = CONVECTION_MODEL
-        self.DIFFUSION_MODEL  = DIFFUSION_MODEL
-        self.SAMPLING_FUN     = SAMPLING_FUN
+        self.physics_model    = PHYSICS_MODEL
         self.WEIGHT_PDE       = WEIGHT_PDE
         self.WEIGHT_BOUNDARY  = WEIGHT_BOUNDARY
         self.HESSIAN_CALC     = HESSIAN_CALC
+        if not UNCERTAIN_PARAM == None:
+            self.UNCERTAIN_PARAM  = UNCERTAIN_PARAM
+            self.param_optimizer  = torch.optim.Adam([UNCERTAIN_PARAM], lr=PARAM_LEARN_RATE)
         
         # Initialization of variables
         self.target_update_counter = 0
@@ -141,16 +142,6 @@ class PIRLagent:
         state = torch.FloatTensor(state.reshape(1, -1)).to(device)   
         return self.critic(state).max()
     
-    def get_epsilon_greedy_action(self, state):
-        
-        if np.random.random() > self.epsilon:
-            # Greedy action from Q network
-            action_idx = int( torch.argmax(self.get_qs(state)) )
-        else:
-            # Random action
-            action_idx = np.random.randint(0, self.actNum)  
-        return action_idx
-
     ####################################################################
     # Training loop
     ####################################################################
@@ -186,9 +177,9 @@ class PIRLagent:
             self.epsilon = max(self.EPSILON_MIN, 
                                self.EPSILON_INI*np.power(self.EPSILON_DECAY,RESTART_EP))
     
-        ###########################################################################
+        #######################################################################
         # Main loop
-        ###########################################################################
+        #######################################################################
         for episode in iterator:
             
             ##########################
@@ -204,7 +195,12 @@ class PIRLagent:
             while not is_done:
         
                 # get action
-                action_idx = self.get_epsilon_greedy_action(state)
+                if np.random.random() > self.epsilon:
+                    # Greedy action from Q network
+                    action_idx = int( torch.argmax(self.get_qs(state)) )
+                else:
+                    # Random action
+                    action_idx = np.random.randint(0, self.actNum)  
                 action     = env.action_from_index(action_idx)
                 
                 # make a step
@@ -214,7 +210,7 @@ class PIRLagent:
                 # store experience and train Q network
                 self.replay_memory.add(state, action_idx, next_state, reward, is_done)
                 if len(self.replay_memory) > self.REPLAY_MEMORY_MIN:
-                    self.update_step()
+                    self.update_critic()
         
                 # update current state
                 state = next_state
@@ -222,8 +218,14 @@ class PIRLagent:
             ################################################
             # Update target Q-function and decay epsilon            
             ################################################
-            self.update_target()
-            self.decay_epsilon()
+            self.target_update_counter += 1
+            if self.target_update_counter > self.UPDATE_TARGET_EVERY:
+                self.critic_target.load_state_dict(self.critic.state_dict())
+                self.target_update_counter = 0
+    
+            if self.epsilon > self.EPSILON_MIN:
+                self.epsilon *= self.EPSILON_DECAY
+                self.epsilon  = max( self.EPSILON_MIN, self.epsilon)        
         
             ###################################################
             # Log
@@ -231,6 +233,9 @@ class PIRLagent:
             if LOG_DIR: 
                 summary_writer.add_scalar("Episode Reward", episode_reward, episode)
                 summary_writer.add_scalar("Episode Q0",     episode_q0,     episode)
+                if not self.UNCERTAIN_PARAM==None:
+                    for i in range(len(self.UNCERTAIN_PARAM)):
+                        summary_writer.add_scalar(f"Model Param{i}", self.UNCERTAIN_PARAM[i], episode)
                 summary_writer.flush()
     
                 if SAVE_AGENTS and episode % SAVE_FREQ == 0:
@@ -241,7 +246,7 @@ class PIRLagent:
                                 }, 
                                ckpt_path)
    
-    def update_step(self):
+    def update_critic(self):
 
         ###############################################
         # Calculate DQN loss
@@ -256,124 +261,61 @@ class PIRLagent:
 
         # DQN Loss (lossD)
         currentQ = self.critic(state).gather(1, action_idx)        
-        lossD  = F.mse_loss( currentQ, targetQ )        
+        loss     = F.mse_loss( currentQ, targetQ )        
 
         ########################################
         # Calculate PDE Loss
         ########################################
-        # Samples for PDE
-        X_PDE, X_BDini, X_BDlat = self.SAMPLING_FUN()
-        #X_PDE = tf.Variable(X_PDE)        
-
-        # Convection and diffusion coefficient
-        with torch.no_grad():
-            Qsa = self.critic(torch.tensor(X_PDE, dtype=torch.float))
-            Uidx_PDE   = Qsa.argmax(1).numpy().reshape(-1, 1)               
-        f =  np.apply_along_axis(self.CONVECTION_MODEL, 1, 
-                                 np.concatenate([X_PDE, Uidx_PDE], axis=1) )
-        A =  np.apply_along_axis(self.DIFFUSION_MODEL, 1, 
-                                 np.concatenate([X_PDE, Uidx_PDE], axis=1))
-
-        # PDE loss (lossP)
-        if self.HESSIAN_CALC: 
-
-            #from functorch import hessian
-            
+        if self.physics_model:
+            # Samples for PDE
+            X_PDE, X_ini, X_lat = self.physics_model.sampling()
             X_PDE = torch.tensor(X_PDE, dtype=torch.float, requires_grad=True)
-            Qsa   = self.critic(X_PDE)
-            V     = Qsa.max(1) 
-            dV_dx = torch.autograd.grad(V.values.sum(), X_PDE, create_graph=True)[0]
+            U_idx = self.critic(X_PDE).argmax(1, keepdim=True)
+            if not self.UNCERTAIN_PARAM == None:
+                f     = self.physics_model.convection(X_PDE,U_idx, self.UNCERTAIN_PARAM)
+            else:
+                f     = self.physics_model.convection(X_PDE,U_idx)
+            dV_dx = torch.autograd.grad(self.critic(X_PDE).max(1).values.sum(), X_PDE, create_graph=True)[0]
+            conv_term = ( dV_dx * f ).sum(1)
+
+        # Diffusion term
+        if self.physics_model and self.HESSIAN_CALC:
+            # start_time_hess = datetime.now()
+            diff_term = self.physics_model.diffusion(X_PDE, dV_dx)
+            # end_time_hess = datetime.now()
+            # elapsed_time = end_time_hess - start_time_hess
+            # print("hess cal time:", elapsed_time)       
+            loss += F.mse_loss(conv_term + diff_term, 
+                               torch.zeros_like(conv_term))*self.WEIGHT_PDE             
+        elif self.physics_model:
+            loss += F.mse_loss(conv_term, 
+                               torch.zeros_like(conv_term))*self.WEIGHT_PDE             
+        
+        ########################################
+        # Calculate Boundary Loss (lossB)
+        ########################################
+        if self.physics_model:
+            # termanal boundary (horizon = 0)
+            V_ini  = self.critic(torch.tensor(X_ini, dtype=torch.float32)).max(1).values
+            loss  += F.mse_loss( V_ini, torch.ones_like(V_ini))*self.WEIGHT_BOUNDARY
             
-            # jacobian_rows = [torch.autograd.grad(dV_dx, X_PDE, vec)[0]
-            #          for vec in torch.eye(len(X_PDE[0]))]
-            # return torch.stack(jacobian_rows)
-                
-        else: 
-            
-            X_PDE = torch.tensor(X_PDE, dtype=torch.float, requires_grad=True)
-            Qsa   = self.critic(X_PDE)
-            V     = Qsa.max(1) 
-            dV_dx = torch.autograd.grad(V.values.sum(), X_PDE, create_graph=True)[0]
-                        
-        #end_time_hess = datetime.datetime.now()
-        #elapsed_time = end_time_hess - start_time_hess
-
-        #print("calc_Hess:", elapsed_time)
-
-        '''
-        # check gradient implementation (for debug)
-        print('\n V=', V)
-        ##
-        V_dx = tf.reduce_max( self.critic( X_PDE + [0.01, 0, 0]), axis=1)
-        dV_dx_man = ( V_dx - V ) / 0.01
-        print('dV_dx[:,0]=',  dV_dx[:,0])
-        print('dV_dx[:,0] ~ ', dV_dx_man)
-        ##
-        V_dx2 = tf.reduce_max( self.critic( X_PDE - [0.01, 0, 0]), axis=1)
-        HessV0_man = ( V_dx - 2.0*V + V_dx2 ) / ( (0.01)**2 )
-        print(Hess[:,0])
-        print(HessV0_man)
-        '''                  
-
-        ## Convection term
-        conv_term = ( dV_dx * torch.tensor(f, dtype=torch.float32) ).sum(1)
-
-        if self.HESSIAN_CALC:
-            # Diffusion term            
-            #diff_term = (1/2) * tf.linalg.trace( tf.matmul(A, HessV) )
-            #diff_term = tf.cast(diff_term, dtype=tf.float32)
-                          
-            # lossP
-            # lossP = tf.metrics.mean_squared_error(conv_term + diff_term, 
-            #                                       np.zeros_like(conv_term) )
-            lossP = torch.nn.functional.mse_loss( conv_term, 
-                                                  torch.zeros_like(conv_term) )             
-
-        else:
-            # lossP
-            lossP = torch.nn.functional.mse_loss( conv_term, 
-                                                  torch.zeros_like(conv_term) )             
+            # lateral boundary
+            V_lat  = self.critic(torch.tensor(X_lat, dtype=torch.float32)).max(1).values
+            loss  += F.mse_loss( V_lat, torch.zeros_like(V_lat))*self.WEIGHT_BOUNDARY
         
-        ########################
-        # Boundary loss (lossB)
-        ########################
-        # termanal boundary (\tau = 0)
-        y_bd_ini = self.critic(torch.tensor(X_BDini, dtype=torch.float32)).max(1).values
-        lossBini = torch.nn.functional.mse_loss( y_bd_ini, torch.ones_like(y_bd_ini) )
-        
-        # lateral boundary
-        y_bd_lat = self.critic(torch.tensor(X_BDlat, dtype=torch.float32)).max(1).values
-        lossBlat = torch.nn.functional.mse_loss( y_bd_lat, torch.zeros_like(y_bd_lat) )
-        
-        lossB = lossBini + lossBlat
-
-
         #####################################
         # Update neural network weights 
         #####################################
-        Lambda = self.WEIGHT_PDE
-        Mu     = self.WEIGHT_BOUNDARY
-        loss = lossD + Lambda*lossP + Mu*lossB      
-
         loss.backward()
         self.critic_optimizer.step()
         self.critic_optimizer.zero_grad()
 
+        if not self.UNCERTAIN_PARAM==None:
+            self.param_optimizer.step()
+            self.param_optimizer.zero_grad()
+
         return # end: train_step
 
-
-    def update_target(self):
-
-        self.target_update_counter += 1
-        if self.target_update_counter > self.UPDATE_TARGET_EVERY:
-            self.critic_target.load_state_dict(self.critic.state_dict())
-            self.target_update_counter = 0
-
-    def decay_epsilon(self):
-        
-        if self.epsilon > self.EPSILON_MIN:
-            self.epsilon *= self.EPSILON_DECAY
-            self.epsilon  = max( self.EPSILON_MIN, self.epsilon)        
 
 
     def load_weights(self, ckpt_dir, ckpt_idx=None):

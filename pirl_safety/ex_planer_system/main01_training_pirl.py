@@ -20,21 +20,18 @@ class PlanerEnv(object):
         self.ACTIONS = [-1, 0, 1]
         
     def reset(self):
-
         s  = np.sign( np.random.randn(2) )
         r  = np.random.rand(2)
         X1  = s[0]*r[0]*1.5
         X2  = s[1]*r[1]*1.0  
         T   = 2.0
         self.state = np.array([X1, X2, T])
-        
         return self.state
 
     def action_from_index(self, action_idx):
         return self.ACTIONS[action_idx] 
 
     def step(self, action):       
-        
         # Current state
         X1 = self.state[0]
         X2 = self.state[1]
@@ -42,8 +39,8 @@ class PlanerEnv(object):
         U  = action
         # next state
         next_state = np.zeros_like(self.state)
-        next_state[0]  =  X1 + self.dt*( -X1**3- X2)
-        next_state[1]  =  X2 + self.dt*( X1   + X2) + U
+        next_state[0]  =  X1 + self.dt*( - X1**3- X2)
+        next_state[1]  =  X2 + self.dt*( X1   + X2 + U )
         next_state[2]  =  T -self.dt
         
         # Check terminal conditios 
@@ -62,50 +59,56 @@ class PlanerEnv(object):
         return next_state, reward, done
 
 
+###########################
+# Physics Model
+###########################
+class PhysicsModel(object):    
 
-def convection_model(x_and_actIdx):
+    def __init__(self): 
+        
+        self.state_dim = 2 + 1 # state + horizon
+        self.actions   = torch.tensor([-1, 0, 1])
+        self.xi        = torch.tensor([0.0], requires_grad=True)
 
-    x      = x_and_actIdx[:-1]
-    actIdx = int(x_and_actIdx[-1]) 
-
-    x1 = x[0]
-    x2 = x[1]
-    u  = [-1,0,1][actIdx]
-
-    dxdt = np.array([-x1**3 -x2, 
-                     x1 + x2 + u, 
-                     -1 ])
- 
-    return dxdt    
-
-def diffusion_model(x_and_actIdx):
-
-    sig  = np.diag([0.2, 0.2, 0])
-    diff = np.matmul( sig, sig.T )
- 
-    return diff
-
-def sample_for_pinn():
-
-    # Interior points    
-    nPDE  = 32
-    x_min, x_max = np.array([-1.5, -0.95, 0]), np.array([1.5, 0.95, 2.0])                
-    X_PDE = x_min + (x_max - x_min)* np.random.rand(nPDE, 3)
-
-    # Terminal boundary (at T=0 and safe)
-    nBDini  = 32
-    x_min, x_max = np.array([-1.5, -1.0, 0]), np.array([1.5, 1.0, 0])                
-    X_BD_TERM = x_min + (x_max - x_min)* np.random.rand(nBDini, 3)
-
-    # Lateral boundary (unsafe set)        
-    nBDsafe = 32
-    x_min, x_max = np.array([-1.5, 1.0, 0]), np.array([1.5, 1.0, 2.0])
-    X_BD_LAT = x_min + (x_max - x_min)* np.random.rand(nBDsafe, 3)
-    x2_sign  = np.sign(np.random.randn(nBDsafe) )
-    X_BD_LAT[:,1] = X_BD_LAT[:,1] * x2_sign    
+    def action_from_index(self, u_idx):
+        return self.actions[u_idx]
+        
+    def convection(self, x, u, xi):        
+        output = torch.empty((x.size(0), self.state_dim))        
+        output[:, 0] = xi*x[:, 0]**3 - x[:, 1]
+        output[:, 1] = x[:, 0] + x[:, 1] + u[:,0]
+        output[:, 2] = -1            
+        return output
     
-    return X_PDE, X_BD_TERM, X_BD_LAT
+    def diffusion(self, x, dV_dx):
 
+        diff   = 0 
+        sig    = [0.2, 0.2, 0]
+        dV2dx2 = [torch.autograd.grad(dV_dx[:, i].sum(), x, retain_graph=True)[0][:,i]
+                  for i in range(x.size(1))]
+        for i in range(x.size(1)):
+            diff += (sig[i]**2) * dV2dx2[i]        
+        return diff 
+
+    def sampling(self):        
+        # Interior points    
+        nPDE  = 100
+        x_min, x_max = np.array([-1.5, -0.95, 0]), np.array([1.5, 0.95, 2.0])                
+        X_PDE = x_min + (x_max - x_min)* np.random.rand(nPDE, 3)
+
+        # Terminal boundary (at T=0 and safe)
+        nBDini  = 32
+        x_min, x_max = np.array([-1.5, -1.0, 0]), np.array([1.5, 1.0, 0])                
+        X_TERM = x_min + (x_max - x_min)* np.random.rand(nBDini, 3)
+
+        # Lateral boundary (unsafe set)        
+        nBDsafe = 32
+        x_min, x_max = np.array([-1.5, 1.0, 0]), np.array([1.5, 1.0, 2.0])
+        X_LAT = x_min + (x_max - x_min)* np.random.rand(nBDsafe, 3)
+        x2_sign  = np.sign(np.random.randn(nBDsafe) )
+        X_LAT[:,1] = X_LAT[:,1] * x2_sign    
+
+        return X_PDE, X_TERM, X_LAT
 
 
 ##########################################################
@@ -115,7 +118,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", default="TD3")         # Agent type (DQN or TD3)
-    parser.add_argument("--seed", default=0, type=int)    # Sets PyTorch and Numpy seeds
+    parser.add_argument("--seed",  default=0, type=int)    # Sets PyTorch and Numpy seeds
 
     args = parser.parse_args()
     
@@ -130,6 +133,9 @@ if __name__ == "__main__":
     act_dim    = 1
     action_num = len(rlenv.ACTIONS)
     max_act    = 1
+    
+    # PhysicsModel
+    model     = PhysicsModel()
 
     #########################################
     # TD3 agent
@@ -149,11 +155,12 @@ if __name__ == "__main__":
                               NOISE_CLIP         = 0.5,
                               POLICY_FREQ        = 4,
                               ### PINN options
-                              CONVECTION_MODEL = convection_model,
-                              DIFFUSION_MODEL  = diffusion_model,
-                              SAMPLING_FUN     = sample_for_pinn, 
-                              WEIGHT_PDE       = 1e-2, 
-                              WEIGHT_BOUNDARY  = 1
+                              PHYSICS_MODEL       = model,
+                              WEIGHT_PDE          = 1e-3, 
+                              WEIGHT_BOUNDARY     = 1,
+                              HESSIAN_CALC        = True,
+                              UNCERTAIN_PARAM     = model.xi,
+                              PARAM_LEARN_RATE    = 5e-4,
                               )
 
     #########################################
@@ -170,11 +177,12 @@ if __name__ == "__main__":
                               MINIBATCH_SIZE      = 32,                              
                               UPDATE_TARGET_EVERY = 5, 
                               ### Options for PINN
-                              CONVECTION_MODEL = convection_model,
-                              DIFFUSION_MODEL  = diffusion_model,
-                              SAMPLING_FUN     = sample_for_pinn, 
-                              WEIGHT_PDE       = 5e-3, 
-                              WEIGHT_BOUNDARY  = 1, 
+                              PHYSICS_MODEL       = model,
+                              WEIGHT_PDE          = 1e-3, 
+                              WEIGHT_BOUNDARY     = 1, 
+                              HESSIAN_CALC        = True,
+                              UNCERTAIN_PARAM     = model.xi,
+                              PARAM_LEARN_RATE    = 5e-4,
                               )
 
     print("--------------------------------------------")
