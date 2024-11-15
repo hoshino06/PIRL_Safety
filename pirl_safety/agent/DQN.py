@@ -125,8 +125,8 @@ class PIRLagent:
         self.WEIGHT_PDE       = WEIGHT_PDE
         self.WEIGHT_BOUNDARY  = WEIGHT_BOUNDARY
         self.HESSIAN_CALC     = HESSIAN_CALC
-        if not UNCERTAIN_PARAM == None:
-            self.UNCERTAIN_PARAM  = UNCERTAIN_PARAM
+        self.UNCERTAIN_PARAM  = UNCERTAIN_PARAM
+        if not self.UNCERTAIN_PARAM == None:
             self.param_optimizer  = torch.optim.Adam([UNCERTAIN_PARAM], lr=PARAM_LEARN_RATE)
         
         # Initialization of variables
@@ -317,7 +317,6 @@ class PIRLagent:
         return # end: train_step
 
 
-
     def load_weights(self, ckpt_dir, ckpt_idx=None):
 
         if not os.path.isdir(ckpt_dir):         
@@ -334,9 +333,9 @@ class PIRLagent:
                 raise FileNotFoundError("Check point 'agent-{}' does not exist.".format(ckpt_idx))
 
         checkpoint = torch.load(ckpt_path)
-        self.critic.load_state_dict(checkpoint['weights'])
-        self.target_model.load_state_dict(checkpoint['target-weights'])        
-        self.replay_memory = checkpoint['replay_memory']
+        self.critic.load_state_dict(checkpoint['critic-weights'])
+        self.critic_target.load_state_dict(checkpoint['target-weights'])        
+        #self.replay_memory = checkpoint['replay_memory']
         
         print(f'Agent loaded weights stored in {ckpt_path}')
         

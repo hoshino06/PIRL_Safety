@@ -1,5 +1,6 @@
 """
   Training of PIRL agent for planer system
+  (example with DQN and without uncertain parameter)
 """
 
 import numpy as np
@@ -9,7 +10,7 @@ import torch
 
 import sys, os
 sys.path.append(os.pardir)
-from agent import TD3, DQN
+from agent import DQN
 
 ###########################
 # RL Environment
@@ -60,7 +61,8 @@ class PlanerEnv(object):
 
 
 ###########################
-# Physics Model
+# Physics Model:
+# assuming no parameter uncertainty in this example
 ###########################
 class PhysicsModel(object):    
 
@@ -73,9 +75,9 @@ class PhysicsModel(object):
     def action_from_index(self, u_idx):
         return self.actions[u_idx]
         
-    def convection(self, x, u, xi):        
+    def convection(self, x, u):        
         output = torch.empty((x.size(0), self.state_dim))        
-        output[:, 0] = xi*x[:, 0]**3 - x[:, 1]
+        output[:, 0] = x[:, 0]**3 - x[:, 1]
         output[:, 1] = x[:, 0] + x[:, 1] + u[:,0]
         output[:, 2] = -1            
         return output
@@ -117,7 +119,6 @@ class PhysicsModel(object):
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", default="DQN")         # Agent type (DQN or TD3)
     parser.add_argument("--seed",  default=0, type=int)    # Sets PyTorch and Numpy seeds
 
     args = parser.parse_args()
@@ -138,57 +139,25 @@ if __name__ == "__main__":
     model     = PhysicsModel()
 
     #########################################
-    # TD3 agent 
-    #########################################
-    if args.agent == "TD3":         
-        agent = TD3.PIRLagent(state_dim, act_dim, max_act,
-                              ### Learning rate
-                              ACTOR_LEARN_RATE   = 1e-3,
-                              CRITIC_LEARN_RATE  = 1e-3,
-                              ### TD3 options
-                              DISCOUNT           = 1,        
-                              REPLAY_MEMORY_SIZE = int(1e4), 
-                              REPLAY_MEMORY_MIN  = 1000,
-                              MINIBATCH_SIZE     = 32,                       
-                              TAU                = 0.005,
-                              POLICY_NOISE       = 0.2, 
-                              NOISE_CLIP         = 0.5,
-                              POLICY_FREQ        = 4,
-                              ### PINN options
-                              PHYSICS_MODEL       = model,
-                              WEIGHT_PDE          = 1e-3, 
-                              WEIGHT_BOUNDARY     = 1,
-                              HESSIAN_CALC        = True,
-                              UNCERTAIN_PARAM     = model.xi,
-                              PARAM_LEARN_RATE    = 5e-4,
-                              )
-
-    #########################################
     # DQN agent
     #########################################
-    elif args.agent == "DQN":        
-        agent = DQN.PIRLagent(state_dim, action_num,
-                              ## Learning rate
-                              CRITIC_LEARN_RATE   = 5e-3,                              
-                              ## DQN options
-                              DISCOUNT            = 1, 
-                              REPLAY_MEMORY_SIZE  = int(1e4), 
-                              REPLAY_MEMORY_MIN   = 1000,
-                              MINIBATCH_SIZE      = 32,                              
-                              UPDATE_TARGET_EVERY = 5, 
-                              ### Options for PINN
-                              PHYSICS_MODEL       = model,
-                              WEIGHT_PDE          = 1e-3, 
-                              WEIGHT_BOUNDARY     = 1, 
-                              HESSIAN_CALC        = True,
-                              UNCERTAIN_PARAM     = model.xi,
-                              PARAM_LEARN_RATE    = 5e-4,
-                              )
-
-    print("--------------------------------------------")
-    print(f"Agent: {args.agent}, Seed: {args.seed}")
-    print("--------------------------------------------")
-
+    agent = DQN.PIRLagent(state_dim, action_num,
+                          ## Learning rate
+                          CRITIC_LEARN_RATE   = 5e-3,                              
+                          ## DQN options
+                          DISCOUNT            = 1, 
+                          REPLAY_MEMORY_SIZE  = int(1e4), 
+                          REPLAY_MEMORY_MIN   = 1000,
+                          MINIBATCH_SIZE      = 32,                              
+                          UPDATE_TARGET_EVERY = 5, 
+                          ### Options for PINN
+                          PHYSICS_MODEL       = model,
+                          WEIGHT_PDE          = 1e-3, 
+                          WEIGHT_BOUNDARY     = 1, 
+                          HESSIAN_CALC        = True,
+                          UNCERTAIN_PARAM     = None,
+                          PARAM_LEARN_RATE    = 5e-4,
+                          )
     
     #########################################
     # training
@@ -203,4 +172,3 @@ if __name__ == "__main__":
                 SAVE_AGENTS   = True, 
                 SAVE_FREQ     = 500,
                 )
-

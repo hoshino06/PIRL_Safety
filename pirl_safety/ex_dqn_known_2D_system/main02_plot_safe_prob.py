@@ -4,56 +4,25 @@ Created on Sat Oct  5 14:50:59 2024
 @author: hoshino
 """
 import torch
-from torch import nn
 import matplotlib.pyplot as plt
 
 import sys, os
 sys.path.append(os.pardir)
 
 
-
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--agent", default="TD3")         # Agent type (DQN or TD3)
-args = parser.parse_args()
-
-
-
-log_dir     = 'logs/test/1014_0747'
+data_dir    = 'logs/test/1115_1139'
 check_point = 'latest'
 
 ################################
 # Load agent    
 ################################
-
-
 from agent.DQN import PIRLagent
-
-
-class NeuralNetwork(nn.Module):
-    def __init__(self, obsNum, actNum):
-        super().__init__()
-        self.linear_stack = nn.Sequential(
-            nn.Linear(obsNum, 32),
-            nn.Tanh(),
-            nn.Linear(32, 32),
-            nn.Tanh(),
-            nn.Linear(32, 32),
-            nn.Tanh(),
-            nn.Linear(32, actNum),
-            nn.Sigmoid()
-            )
-    def forward(self, x):
-        output = self.linear_stack(x)
-        return output
 
 obsNum = 2 + 1
 actNum = 3 
-model  = NeuralNetwork(obsNum, actNum).to('cpu')        
+agent  = PIRLagent(obsNum, actNum)
 
-agent = PIRLagent(model, actNum)
-
-agent.load_weights(log_dir, ckpt_idx=check_point) 
+agent.load_weights(data_dir, ckpt_idx=check_point) 
 
 
 ################################
@@ -66,7 +35,7 @@ T = torch.full_like(X1, 2.0)
 input_tensor = torch.stack([X1.flatten(), X2.flatten(), T.flatten()], dim=-1)
 
 with torch.no_grad():
-    predictions  = agent.model(input_tensor)
+    predictions  = agent.critic(input_tensor)
     max_q_values = predictions.max(dim=-1)[0]
 
 max_q_values_np  = max_q_values.view(100,100).numpy()    
