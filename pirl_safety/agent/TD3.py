@@ -2,6 +2,7 @@
 """
   Implementation of TD3-based PIRL with pytorch
 """
+import os
 import copy
 from   datetime import datetime
 import numpy as np
@@ -372,3 +373,32 @@ class PIRLagent(object):
 
             for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+
+    ########################################################
+    # Load agent's weights
+    ########################################################
+    def load_weights(self, ckpt_dir, ckpt_idx=None):
+
+        if not os.path.isdir(ckpt_dir):         
+            raise FileNotFoundError("Directory '{}' does not exist.".format(ckpt_dir))
+
+        if not ckpt_idx or ckpt_idx == 'latest': 
+            check_points = [item for item in os.listdir(ckpt_dir) if 'agent' in item]
+            check_nums   = np.array([int(file_name.split('-')[1]) for file_name in check_points])
+            latest_ckpt  = f'/agent-{check_nums.max()}'  
+            ckpt_path    = ckpt_dir + latest_ckpt
+        else:
+            ckpt_path = ckpt_dir + f'/agent-{ckpt_idx}'
+            if not os.path.isfile(ckpt_path):   
+                raise FileNotFoundError("Check point 'agent-{}' does not exist.".format(ckpt_idx))
+
+        checkpoint = torch.load(ckpt_path)
+        self.actor.load_state_dict(checkpoint['actor-weights'])
+        self.critic.load_state_dict(checkpoint['critic-weights'])
+        #self.replay_memory = checkpoint['replay_memory']
+        
+        print(f'Agent loaded weights stored in {ckpt_path}')
+        
+        return ckpt_path    
+
+
